@@ -101,7 +101,7 @@ namespace Interpret_grading_documents.Services
                 ChatCompletion chatCompletion = await GetChatCompletionAsync(client, messages);
                 GraduationDocument document = DeserializeResponse(chatCompletion.Content[0].Text);
 
-                var updatedDocument = CompareCourses(document);
+                var updatedDocument = await CompareCoursesAsync(document);
                 ValidateDocument(updatedDocument, reliabilityResult);
 
                 return updatedDocument;
@@ -214,6 +214,7 @@ namespace Interpret_grading_documents.Services
                         "8. Läroplan (Titta på typen av betyg, till exempel MVG, VG en skolform innan GY11, grundskolebetyg är Lgr11 eller Lgr22.)\n" +
                         "9. Lista över ämnen med följande detaljer:\n" +
                         "   - Ämnesnamn\n" +
+                        "   - Kurskod\n" +
                         "   - Betyg\n" +
                         "Vänligen se till att formatera svaret i JSON-format som detta:\n" +
                         "{\n" +
@@ -228,6 +229,7 @@ namespace Interpret_grading_documents.Services
                         "   'subjects': [\n" +
                         "       {\n" +
                         "           'subject_name': 'Ämnesnamn',\n" +
+                        "            'course_code': " +
                         "           'grade': 'Betyg',\n" +
                         "       },\n" +
                         "       ... fler ämnen\n" +
@@ -273,11 +275,10 @@ namespace Interpret_grading_documents.Services
             return JsonSerializer.Deserialize<GraduationDocument>(jsonResponse);
         }
 
-        private GraduationDocument CompareCourses(GraduationDocument document)
+        private async Task<GraduationDocument> CompareCoursesAsync(GraduationDocument document)
         {
-            string validationJsonPath = Path.Combine("Data", "kurser.json");
-            CourseComparator courseComparator = new CourseComparator(document, validationJsonPath);
-            var updatedDocument = courseComparator.CompareCourses();
+            CourseComparator courseComparator = new CourseComparator(document);
+            var updatedDocument = await courseComparator.CompareCoursesAsync();
 
             return updatedDocument;
         }

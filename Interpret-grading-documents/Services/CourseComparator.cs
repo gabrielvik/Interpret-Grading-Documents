@@ -1,139 +1,113 @@
 ﻿using System.Text.Json;
-using FuzzySharp;
 using System.Linq;
 using System.Collections.Generic;
-using static Interpret_grading_documents.Services.GPTService;
+using System.Net.Http;
+using System.Threading.Tasks;
 
 namespace Interpret_grading_documents.Services;
 
 public class CourseDetail
 {
-    public string CourseName { get; set; }
-    public string CourseCode { get; set; }
-    public int? Points { get; set; }
+    public string Code { get; set; }
+    public string Name { get; set; }
+    public string Points { get; set; }
+}
+
+public class ApiResponse
+{
+    public CourseDetail Course { get; set; }
 }
 
 public class CourseComparator
 {
-    private Dictionary<string, CourseDetail> validationCourses;
-    private GraduationDocument graduationDocument;
-    private int matchThreshold = 80;
+    private GPTService.GraduationDocument graduationDocument;
 
-    public CourseComparator(GraduationDocument graduationDocument, string validationJsonPath)
+    public CourseComparator(GPTService.GraduationDocument graduationDocument)
     {
         this.graduationDocument = graduationDocument;
-
-        // Read and parse the validation JSON using System.Text.Json
-        string validationJson = File.ReadAllText(validationJsonPath);
-        validationCourses = JsonSerializer.Deserialize<Dictionary<string, CourseDetail>>(validationJson);
-
-        // Assign CourseName to each CourseDetail (since the key is the course name)
-        foreach (var kvp in validationCourses)
-        {
-            kvp.Value.CourseName = kvp.Key;
-        }
     }
 
-    private (string BestMatch, int BestScore) FindBestMatch(string subjectName)
+    private async Task<CourseDetail> FetchCourseDataFromApi(string courseCode)
     {
-        string bestMatch = null;
-        int bestScore = 0;
+        string url = $"https://api.skolverket.se/syllabus/v1/courses/{courseCode}";
 
-        foreach (var validationCourse in validationCourses.Keys)
+        using (HttpClient client = new HttpClient())
         {
-            int score = Fuzz.Ratio(subjectName.ToLower(), validationCourse.ToLower());
-
-            if (score > bestScore)
+            try
             {
-                bestScore = score;
-                bestMatch = validationCourse;
+                HttpResponseMessage response = await client.GetAsync(url);
+                string apiResponse = await response.Content.ReadAsStringAsync();
+
+                if (response.IsSuccessStatusCode)
+                {
+                    // The response contains the entire API response, including metadata
+                    var apiResponseObject = JsonSerializer.Deserialize<ApiResponse>(apiResponse, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+
+                    if (apiResponseObject != null && apiResponseObject.Course != null)
+                    {
+                        return apiResponseObject.Course;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"No course data found in API response for course code {courseCode}.");
+                        return null;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Failed to fetch data from API for course code {courseCode}. Status code: {response.StatusCode}");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception occurred while fetching data from API for course code {courseCode}: {ex.Message}");
+                return null;
             }
         }
-
-        if (bestScore >= matchThreshold)
-        {
-            Console.WriteLine($"Fuzzy match found! Original: '{subjectName}' => Matched with: '{bestMatch}' (Score: {bestScore})");
-            return (bestMatch, bestScore);
-        }
-
-        Console.WriteLine($"No valid match found for '{subjectName}' (Best score: {bestScore}) - Below match threshold of {matchThreshold}");
-        return (null, bestScore);
     }
 
-    public int GetTotalPoints()
-    {
-        int totalPoints = 0;
-
-        foreach (var subject in graduationDocument.Subjects)
-        {
-            var (bestMatch, bestScore) = FindBestMatch(subject.SubjectName);
-            subject.FuzzyMatchScore = bestScore;  // Set the fuzzy match score for the subject
-
-            if (bestMatch != null && validationCourses.ContainsKey(bestMatch))
-            {
-                Console.WriteLine($"Adding points for subject '{subject.SubjectName}' with match '{bestMatch}' - Points: {validationCourses[bestMatch].Points}");
-
-                // Update the subject details
-                subject.GymnasiumPoints = validationCourses[bestMatch].Points.ToString();
-                subject.CourseCode = validationCourses[bestMatch].CourseCode;
-
-                totalPoints += validationCourses[bestMatch].Points ?? 0;
-            }
-        }
-
-        return totalPoints;
-    }
-
-    public List<string> GetUnmatchedSubjects()
-    {
-        var unmatchedSubjects = new List<string>();
-
-        foreach (var subject in graduationDocument.Subjects)
-        {
-            var (bestMatch, bestScore) = FindBestMatch(subject.SubjectName);
-            subject.FuzzyMatchScore = bestScore;  // Set the fuzzy match score for the subject
-
-            if (bestMatch == null)
-            {
-                unmatchedSubjects.Add(subject.SubjectName);
-                Console.WriteLine($"Unmatched subject: '{subject.SubjectName}'");
-            }
-        }
-
-        return unmatchedSubjects;
-    }
-
-    public GraduationDocument UpdateMatchedSubjects()
+    public async Task<GPTService.GraduationDocument> UpdateMatchedSubjectsAsync()
     {
         foreach (var subject in graduationDocument.Subjects)
         {
-            var (bestMatch, bestScore) = FindBestMatch(subject.SubjectName);
-            subject.FuzzyMatchScore = bestScore;  // Set the fuzzy match score for the subject
+            // Attempt to fetch course using the provided course code
+            var courseDetail = await FetchCourseDataFromApi(subject.CourseCode);
 
-            if (bestMatch != null && validationCourses.ContainsKey(bestMatch))
+            if (courseDetail != null)
             {
-                var validationCourse = validationCourses[bestMatch];
+                // Update subject details
+                subject.SubjectName = courseDetail.Name;
+                subject.GymnasiumPoints = courseDetail.Points;
+                subject.CourseCode = courseDetail.Code;
+                subject.FuzzyMatchScore = 100; // Exact match
+            }
+            else
+            {
+                // Try to adjust the course code and try again or use fuzzy matching
 
-                subject.SubjectName = bestMatch;
-                subject.GymnasiumPoints = validationCourse.Points.ToString();
-                subject.CourseCode = validationCourse.CourseCode;
             }
         }
+
         return graduationDocument;
     }
 
-    public GraduationDocument CompareCourses()
+    public async Task<GPTService.GraduationDocument> CompareCoursesAsync()
     {
-        int totalPoints = GetTotalPoints();
-        List<string> unmatchedSubjects = GetUnmatchedSubjects();
-        var updatedDocument = UpdateMatchedSubjects();
+        var updatedDocument = await UpdateMatchedSubjectsAsync();
+
+        // Calculate total points
+        int totalPoints = updatedDocument.Subjects.Sum(s => int.TryParse(s.GymnasiumPoints, out int points) ? points : 0);
 
         Console.WriteLine($"Total Points of Matched Courses: {totalPoints}");
         Console.WriteLine("Subjects that did not match any courses:");
 
-        foreach (var subject in unmatchedSubjects)
+        foreach (var subject in updatedDocument.Subjects.Where(s => s.FuzzyMatchScore == 0))
         {
-            Console.WriteLine(subject);
+            Console.WriteLine(subject.SubjectName);
         }
 
         return updatedDocument;
